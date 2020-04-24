@@ -1,9 +1,19 @@
 #include "VEInclude.h"
 
+extern "C" {
+#include "libavcodec/avcodec.h"
+#include "libavutil/frame.h"
+#include "libavutil/imgutils.h"
+#include <libswscale/swscale.h>
+}
+
 namespace ve {
 
+	uint8_t endcode[] = { 0, 0, 1, 0xb7 };
 	uint32_t g_score = 0;
 	uint8_t g_state = 0; // 0 - searching, 1 - picked up
+	int imgWidth = 800;
+	int imgHeight = 600;
 
 	static const glm::vec3 g_goalPosition = glm::vec3(-5.0f, 1.3f, 5.0f);
 	static const glm::vec3 g_carryPosition = glm::vec3(0.0f, 0.0f, 2.0f);
@@ -12,6 +22,181 @@ namespace ve {
 	static std::default_random_engine e{ 12345 };
 	static std::uniform_real_distribution<> d{ -4.0f, 4.0f };
 
+	class EventListenerFrameDump : public VEEventListenerGLFW
+	{
+	private:
+		int framesPassed = 0;
+		AVCodecContext* enc_ctx;
+		AVFrame* frame;
+		AVPacket* pkt;
+		FILE* outfile;
+		SwsContext* sws_ctx;
+		const int SKIP_FRAMES = 0;
+
+		void encode(AVCodecContext* enc_ctx, uint8_t* dataImage, AVPacket* pkt, FILE* outfile)
+		{
+
+			AVFrame* frame = this->frame;
+
+			if (!dataImage)
+			{
+				frame = NULL;
+			}
+			else
+			{
+				uint8_t* inData[1] = { dataImage }; // RGBA have one plane
+				int inLinesize[1] = { 4 * frame->width }; // RGB stride
+				sws_scale(this->sws_ctx, inData, inLinesize, 0, frame->height, frame->data, frame->linesize);
+			}
+
+			int ret;
+
+			// send the frame to the encoder */
+			ret = avcodec_send_frame(enc_ctx, frame);
+			if (ret < 0) {
+				fprintf(stderr, "error sending a frame for encoding\n");
+				exit(1);
+			}
+
+
+			while (ret >= 0) {
+				int ret = avcodec_receive_packet(enc_ctx, pkt);
+				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+					return;
+				else if (ret < 0) {
+					fprintf(stderr, "error during encoding\n");
+					exit(1);
+				}
+
+				printf("encoded frame %lld (size=%5d)\n", pkt->pts, pkt->size);
+				fwrite(pkt->data, 1, pkt->size, outfile);
+				av_packet_unref(pkt);
+			}
+		}
+
+		void initializeCodec()
+		{
+			std::string filename("media/videos/video-" + std::to_string(time(NULL)) + ".mp4");
+
+			avcodec_register_all();
+			  
+			const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+			if (!codec) {
+				fprintf(stderr, "codec not found\n");
+				exit(1);
+			}
+
+			AVCodecContext* c = avcodec_alloc_context3(codec);
+			AVFrame* picture = av_frame_alloc();
+
+			AVPacket* pkt = av_packet_alloc();
+			if (!pkt) {
+				fprintf(stderr, "Cannot alloc packet\n");
+				exit(1);
+			}
+
+			c->bit_rate = 400000;
+
+			// resolution must be a multiple of two
+			c->width = imgWidth;
+			c->height = imgHeight;
+			// frames per second
+			c->time_base.num = 1;
+			c->time_base.den = 25;
+			c->framerate.num = 25;
+			c->framerate.den = 1;
+
+			c->gop_size = 10; // emit one intra frame every ten frames
+			c->max_b_frames = 1;
+			c->pix_fmt = AV_PIX_FMT_YUV420P;
+
+			// open it
+			if (avcodec_open2(c, codec, NULL) < 0) {
+				fprintf(stderr, "could not open codec\n");
+				exit(1);
+			}
+
+			FILE* f = fopen(filename.c_str(), "wb");
+			if (!f) {
+				fprintf(stderr, "could not open %s\n", filename);
+				exit(1);
+			}
+
+			picture->format = c->pix_fmt;
+			picture->width = c->width;
+			picture->height = c->height;
+
+			int ret = av_frame_get_buffer(picture, 0);
+			if (ret < 0) {
+				fprintf(stderr, "could not alloc the frame data\n");
+				exit(1);
+			}
+
+			SwsContext* ctx = sws_getContext(c->width, c->height,
+				AV_PIX_FMT_RGBA, c->width, c->height,
+				AV_PIX_FMT_YUV420P, 0, 0, 0, 0);
+
+
+			this->frame = picture;
+			this->enc_ctx = c;
+			this->pkt = pkt;
+			this->outfile = f;
+			this->sws_ctx = ctx;
+		}
+		void finalizeCodec()
+		{
+			this->encode(this->enc_ctx, NULL, this->pkt, this->outfile);
+			fwrite(endcode, 1, sizeof(endcode), this->outfile);
+			fclose(this->outfile);
+
+			avcodec_free_context(&(this->enc_ctx));
+			av_frame_free(&(this->frame));
+			av_packet_free(&(this->pkt));
+			sws_freeContext(this->sws_ctx);
+		}
+
+	protected:
+		virtual void onFrameEnded(veEvent event)
+		{
+			framesPassed++;
+			if (framesPassed >= SKIP_FRAMES)
+			{
+				VkExtent2D extent = getWindowPointer()->getExtent();
+				uint32_t imageSize = extent.width * extent.height * 4;
+				VkImage image = getRendererPointer()->getSwapChainImage();
+
+				uint8_t* dataImage = new uint8_t[imageSize];
+
+				vh::vhBufCopySwapChainImageToHost(getRendererPointer()->getDevice(),
+					getRendererPointer()->getVmaAllocator(),
+					getRendererPointer()->getGraphicsQueue(),
+					getRendererPointer()->getCommandPool(),
+					image, VK_FORMAT_R8G8B8A8_UNORM,
+					VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					dataImage, extent.width, extent.height, imageSize);
+
+				m_numScreenshot++;
+				
+				encode(this->enc_ctx, dataImage, this->pkt, this->outfile);
+
+				
+
+				delete[] dataImage;
+				framesPassed = 0;
+			}
+
+		}
+	public:
+		///Constructor of class EventListenerCollision
+		EventListenerFrameDump(std::string name) : VEEventListenerGLFW(name) {
+			this->initializeCodec();
+		};
+
+		///Destructor of class EventListenerCollision
+		virtual ~EventListenerFrameDump() {
+			this->finalizeCodec();
+		};
+	};
 
 
 	class EventListenerCollision : public VEEventListener {
@@ -170,6 +355,7 @@ namespace ve {
 			registerEventListener(new EventListenerCollision("Collision"), { veEvent::VE_EVENT_FRAME_STARTED });
 			registerEventListener(new EventListenerControls("Controls"), { veEvent::VE_EVENT_KEYBOARD });
 			registerEventListener(new EventListenerGUI("GUI"), { veEvent::VE_EVENT_DRAW_OVERLAY });
+			registerEventListener(new EventListenerFrameDump("FrameDump"), { veEvent::VE_EVENT_FRAME_ENDED });
 		};
 
 		void loadCameraAndLights() {
@@ -242,7 +428,7 @@ namespace ve {
 
 			VESceneNode* goalParent, * goalObj;
 			goalParent = getSceneManagerPointer()->createSceneNode("Goal Parent", pScene, glm::mat4(1.0));
-			VECHECKPOINTER(goalObj = getSceneManagerPointer()->loadModel("Goal", "media/models/free/", "skyscraper.obj", aiProcess_FlipWindingOrder);
+			VECHECKPOINTER(goalObj = getSceneManagerPointer()->loadModel("Goal", "media/models/free/", "skyscraper.obj", aiProcess_FlipWindingOrder));
 			goalParent->multiplyTransform(glm::scale(glm::mat4(1.0f), glm::vec3(0.1f, 0.1f, 0.1f)));
 			goalParent->multiplyTransform(glm::translate(glm::mat4(1.0f), g_goalPosition));
 			goalParent->setTransform(glm::rotate(goalParent->getTransform(), -0.25f*glm::pi<float>(), glm::vec3(0.0f, 1.0f, 0.0f)));
@@ -273,7 +459,6 @@ int main() {
 	bool debug = true;
 
 	MyVulkanEngine mve(debug);	//enable or disable debugging (=callback, validation layers)
-
 	mve.initEngine();
 	mve.loadLevel(1);
 	mve.run();
