@@ -1,11 +1,24 @@
 #include "VEInclude.h"
+#include <cstdlib>
+#include <cstdio>
 
 extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libavutil/frame.h"
 #include "libavutil/imgutils.h"
+
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+
+#include <libavutil/avassert.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/opt.h>
+#include <libavutil/mathematics.h>
+#include <libavutil/timestamp.h>
+#include <libavformat/avformat.h>
+
 }
+
 
 namespace ve {
 
@@ -28,130 +41,195 @@ namespace ve {
 		int framesPassed = 0;
 		AVCodecContext* enc_ctx;
 		AVFrame* frame;
-		AVPacket* pkt;
-		FILE* outfile;
+		AVFormatContext* oc;
+		AVOutputFormat* fmt;
+		AVStream* st;
 		SwsContext* sws_ctx;
+		int64_t next_pts = 1;
 		const int SKIP_FRAMES = 0;
 
-		void encode(AVCodecContext* enc_ctx, uint8_t* dataImage, AVPacket* pkt, FILE* outfile)
+		
+		
+		void initializeCodec(std::string encoding, int bit_rate, std::string extension, AVCodecID codec_id)
 		{
-
-			AVFrame* frame = this->frame;
-
-			if (!dataImage)
-			{
-				frame = NULL;
-			}
-			else
-			{
-				uint8_t* inData[1] = { dataImage }; // RGBA have one plane
-				int inLinesize[1] = { 4 * frame->width }; // RGB stride
-				sws_scale(this->sws_ctx, inData, inLinesize, 0, frame->height, frame->data, frame->linesize);
-			}
-
 			int ret;
+			std::string filename("media/videos/video-" +std::to_string(bit_rate) + "-" + avcodec_get_name(codec_id) + "-" + std::to_string(time(NULL)) + "." + extension);
+			
+			AVOutputFormat* fmt;
+			AVFormatContext* oc;
+			AVCodec *codec;
 
-			// send the frame to the encoder */
-			ret = avcodec_send_frame(enc_ctx, frame);
-			if (ret < 0) {
-				fprintf(stderr, "error sending a frame for encoding\n");
+			avformat_alloc_output_context2(&oc, NULL, encoding.c_str(), filename.c_str());
+			if (!oc) {
+				printf("Could not deduce output format from file extension: using MPEG.\n");
+				avformat_alloc_output_context2(&oc, NULL, "mpeg", filename.c_str());
+			}
+			if (!oc) {
+				fprintf(stderr, "format context not found\n");
 				exit(1);
 			}
+			fmt = oc->oformat;
 
-
-			while (ret >= 0) {
-				int ret = avcodec_receive_packet(enc_ctx, pkt);
-				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-					return;
-				else if (ret < 0) {
-					fprintf(stderr, "error during encoding\n");
-					exit(1);
-				}
-
-				printf("encoded frame %lld (size=%5d)\n", pkt->pts, pkt->size);
-				fwrite(pkt->data, 1, pkt->size, outfile);
-				av_packet_unref(pkt);
+			AVCodecContext* c;
+			int i;
+			if (codec_id)
+			{
+				fmt->video_codec = codec_id;
 			}
-		}
-
-		void initializeCodec()
-		{
-			std::string filename("media/videos/video-" + std::to_string(time(NULL)) + ".mp4");
-
-			avcodec_register_all();
-			  
-			const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
+			/* find the encoder */
+			codec = avcodec_find_encoder(fmt->video_codec);
 			if (!codec) {
-				fprintf(stderr, "codec not found\n");
+				fprintf(stderr, "Could not find encoder for '%s'\n",
+					avcodec_get_name(fmt->video_codec));
 				exit(1);
 			}
 
-			AVCodecContext* c = avcodec_alloc_context3(codec);
-			AVFrame* picture = av_frame_alloc();
-
-			AVPacket* pkt = av_packet_alloc();
-			if (!pkt) {
-				fprintf(stderr, "Cannot alloc packet\n");
+			AVStream* st = avformat_new_stream(oc, NULL);
+			if (!st) {
+				fprintf(stderr, "Could not allocate stream\n");
 				exit(1);
 			}
 
-			c->bit_rate = 400000;
+			st->id = oc->nb_streams - 1;
+
+			c = avcodec_alloc_context3(codec);
+			if (!c) {
+				fprintf(stderr, "Could not alloc an encoding context\n");
+				exit(1);
+			}
+
+			c->codec_id = fmt->video_codec;
+			c->bit_rate = bit_rate;
 
 			// resolution must be a multiple of two
 			c->width = imgWidth;
 			c->height = imgHeight;
+			
 			// frames per second
-			c->time_base.num = 1;
-			c->time_base.den = 25;
-			c->framerate.num = 25;
-			c->framerate.den = 1;
-
-			c->gop_size = 10; // emit one intra frame every ten frames
-			c->max_b_frames = 1;
+			st->time_base = AVRational{ 1, 30 };
+			st->avg_frame_rate = AVRational{ 30, 1 };
+			c->time_base = st->time_base;
+			c->framerate = AVRational{ 30, 1 };
+			c->gop_size = 15; // emit one intra frame every 15 frames
 			c->pix_fmt = AV_PIX_FMT_YUV420P;
 
-			// open it
-			if (avcodec_open2(c, codec, NULL) < 0) {
-				fprintf(stderr, "could not open codec\n");
-				exit(1);
-			}
+					   	
+			c->max_b_frames = 2;
 
-			FILE* f = fopen(filename.c_str(), "wb");
-			if (!f) {
-				fprintf(stderr, "could not open %s\n", filename);
-				exit(1);
-			}
+			if (oc->oformat->flags & AVFMT_GLOBALHEADER)
+				c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-			picture->format = c->pix_fmt;
-			picture->width = c->width;
-			picture->height = c->height;
-
-			int ret = av_frame_get_buffer(picture, 0);
+			/* open the codec */
+			ret = avcodec_open2(c, codec, NULL);
 			if (ret < 0) {
-				fprintf(stderr, "could not alloc the frame data\n");
+				fprintf(stderr, "Could not open video codec\n");
 				exit(1);
 			}
+			
+			frame = av_frame_alloc();
+			if (!frame) {
+				fprintf(stderr, "Could not allocate frame data.\n");
+				exit(1);
+			}
+			frame->format = c->pix_fmt;
+			frame->width = c->width;
+			frame->height = c->height;
+			/* allocate the buffers for the frame data */
+			ret = av_frame_get_buffer(frame, 32);
+			if (ret < 0) {
+				fprintf(stderr, "Could not allocate frame data.\n");
+				exit(1);
+			}
+
+			ret = avcodec_parameters_from_context(st->codecpar, c);
+			if (ret < 0) {
+				fprintf(stderr, "Could not copy the stream parameters\n");
+				exit(1);
+			}
+
+			av_dump_format(oc, 0, filename.c_str(), 1);
+
+			ret = avio_open(&oc->pb, filename.c_str(), AVIO_FLAG_WRITE);
+			if (ret < 0) {
+				fprintf(stderr, "Could not open '%s'\n", filename);
+				exit(1);
+			}
+
+			ret = avformat_write_header(oc, NULL);
+			if (ret < 0) {
+				fprintf(stderr, "Error occurred when opening output file");
+				exit(1);
+			}
+
+			
 
 			SwsContext* ctx = sws_getContext(c->width, c->height,
 				AV_PIX_FMT_RGBA, c->width, c->height,
 				AV_PIX_FMT_YUV420P, 0, 0, 0, 0);
 
-
-			this->frame = picture;
+			this->oc = oc;
+			this->st = st;
+			this->fmt = fmt;
+			this->frame = frame;
 			this->enc_ctx = c;
-			this->pkt = pkt;
-			this->outfile = f;
 			this->sws_ctx = ctx;
+		}
+		void encode(uint8_t * dataImage)
+		{
+			int ret;
+			AVCodecContext* c;
+			AVFrame* frame;
+			int got_packet = 0;
+			AVPacket pkt = { 0 };
+			
+			c = this->enc_ctx;
+
+			if (av_frame_make_writable(this->frame) < 0) {
+				fprintf(stderr, "Error making the frame writable");
+				exit(1);
+			}
+			this->frame->pts = this->next_pts++;
+			frame = this->frame;
+
+			uint8_t* inData[1] = { dataImage }; // RGBA have one plane
+			int inLinesize[1] = { 4 * frame->width }; // RGB stride
+			sws_scale(this->sws_ctx, inData, inLinesize, 0, frame->height, frame->data, frame->linesize);
+
+			av_init_packet(&pkt);
+
+			/* encode the image */
+			ret = avcodec_encode_video2(c, &pkt, frame, &got_packet);
+			if (ret < 0) {
+				fprintf(stderr, "Error encoding video frame");
+				exit(1);
+			}
+			if (got_packet) {
+				/* rescale output packet timestamp values from codec to stream timebase */
+				av_packet_rescale_ts(&pkt, c->time_base, st->time_base);
+				(&pkt)->stream_index = st->index;
+				/* Write the compressed frame to the media file. */
+				ret = av_interleaved_write_frame(oc, &pkt);
+			}
+			else {
+				ret = 0;
+			}
+			if (ret < 0) {
+				fprintf(stderr, "Error while writing video frame");
+				exit(1);
+			}
 		}
 		void finalizeCodec()
 		{
-			this->encode(this->enc_ctx, NULL, this->pkt, this->outfile);
-			fwrite(endcode, 1, sizeof(endcode), this->outfile);
-			fclose(this->outfile);
-
+			av_write_trailer(this->oc);
+			
 			avcodec_free_context(&(this->enc_ctx));
 			av_frame_free(&(this->frame));
-			av_packet_free(&(this->pkt));
+						
+			avio_closep(&(this->oc->pb));
+
+			/* free the stream */
+			avformat_free_context(this->oc);
+
 			sws_freeContext(this->sws_ctx);
 		}
 
@@ -159,7 +237,7 @@ namespace ve {
 		virtual void onFrameEnded(veEvent event)
 		{
 			framesPassed++;
-			if (framesPassed >= SKIP_FRAMES)
+			if (framesPassed > SKIP_FRAMES)
 			{
 				VkExtent2D extent = getWindowPointer()->getExtent();
 				uint32_t imageSize = extent.width * extent.height * 4;
@@ -177,8 +255,8 @@ namespace ve {
 
 				m_numScreenshot++;
 				
-				encode(this->enc_ctx, dataImage, this->pkt, this->outfile);
-
+				// encode(this->enc_ctx, dataImage, this->pkt, this->outfile);
+				encode(dataImage);
 				
 
 				delete[] dataImage;
@@ -188,8 +266,8 @@ namespace ve {
 		}
 	public:
 		///Constructor of class EventListenerCollision
-		EventListenerFrameDump(std::string name) : VEEventListenerGLFW(name) {
-			this->initializeCodec();
+		EventListenerFrameDump(std::string name, int bitRate, std::string encoding, std::string extension, AVCodecID codecId) : VEEventListenerGLFW(name) {
+			this->initializeCodec(encoding, bitRate, extension, codecId);
 		};
 
 		///Destructor of class EventListenerCollision
@@ -341,9 +419,19 @@ namespace ve {
 
 
 	class MyVulkanEngine : public VEEngine {
+	private:
+		std::string encoding;
+		int bitRate;
+		std::string extension;
+		AVCodecID codecId;
 	public:
 
-		MyVulkanEngine(bool debug = false) : VEEngine(debug) {};
+		MyVulkanEngine(std::string encoding, int bitRate, std::string extension, AVCodecID codecId, bool debug = false) : 
+			VEEngine(debug),
+			encoding(encoding),
+			bitRate(bitRate),
+			extension(extension),
+			codecId(codecId){};
 		~MyVulkanEngine() {};
 
 
@@ -355,7 +443,7 @@ namespace ve {
 			registerEventListener(new EventListenerCollision("Collision"), { veEvent::VE_EVENT_FRAME_STARTED });
 			registerEventListener(new EventListenerControls("Controls"), { veEvent::VE_EVENT_KEYBOARD });
 			registerEventListener(new EventListenerGUI("GUI"), { veEvent::VE_EVENT_DRAW_OVERLAY });
-			registerEventListener(new EventListenerFrameDump("FrameDump"), { veEvent::VE_EVENT_FRAME_ENDED });
+			registerEventListener(new EventListenerFrameDump("FrameDump", this->bitRate, this->encoding, this->extension, codecId), { veEvent::VE_EVENT_FRAME_ENDED });
 		};
 
 		void loadCameraAndLights() {
@@ -457,8 +545,10 @@ using namespace ve;
 int main() {
 
 	bool debug = true;
+	int br_1Kb = 1000;
+	int br_1Mb = 1000 * br_1Kb;
 
-	MyVulkanEngine mve(debug);	//enable or disable debugging (=callback, validation layers)
+	MyVulkanEngine mve("matroska", 5*br_1Mb, "mkv", AV_CODEC_ID_H264, debug=debug);	//enable or disable debugging (=callback, validation layers)
 	mve.initEngine();
 	mve.loadLevel(1);
 	mve.run();
