@@ -1,6 +1,19 @@
+
+#include <winsock2.h>
+#include <Windows.h>
+#include <Ws2tcpip.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
 #include "VEInclude.h"
 #include <cstdlib>
 #include <cstdio>
+#include <fstream>
+
+
+
+
+#include <cmath>
 
 extern "C" {
 #include "libavcodec/avcodec.h"
@@ -19,14 +32,89 @@ extern "C" {
 
 }
 
+typedef struct MyPackage {
+	int id;
+	int current;
+	int total;
+	int len;
+	char data[1400];
+} MyPackage;
+
+std::mutex mtx;
+
+int sendUDP(char* host, short port, char* message, int length, int id) {
+	char* msgCpy = (char*)malloc(length);
+	memcpy(msgCpy, message, length);
+	int iResult;
+	WSADATA wsaData;
+
+	SOCKET SendSocket = INVALID_SOCKET;
+	sockaddr_in RecvAddr;
+
+	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (iResult != NO_ERROR) {
+		wprintf(L"WSAStartup failed with error: %d\n", iResult);
+		return -1;
+	}
+
+	SendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (SendSocket == INVALID_SOCKET) {
+		wprintf(L"socket failed with error: %ld\n", WSAGetLastError());
+		WSACleanup();
+		return -1;
+	}
+
+	RecvAddr.sin_family = AF_INET;
+	RecvAddr.sin_port = htons(port);
+	RecvAddr.sin_addr.s_addr = inet_addr(host);
+
+	/* send a message to the server */
+	int pos = 0;
+	char buffer[1600];
+	int total = length / 1400;
+	int current = 0;
+	do 
+	{
+		int messageLength = std::min(1400, length - pos);
+		MyPackage package;
+		package.id = id;
+		package.current = current++;
+		package.total = total;
+		package.len = messageLength;
+		int pkgSize = 16 + messageLength;
+		memcpy(&package.data, (char*)(msgCpy + pos), messageLength);
+		memcpy(&buffer, &package, pkgSize);
+		if (sendto(SendSocket, buffer, pkgSize, 0, (struct sockaddr*) & RecvAddr, sizeof(RecvAddr)) < 0) {
+			perror("sendto failed");
+			return -1;
+		}
+		printf("Sent %d %d/%d\n", package.id, package.current, package.total);
+		pos += messageLength;
+	} while (pos < length);
+
+	// wprintf(L"Finished sending. Closing socket.\n");
+	iResult = closesocket(SendSocket);
+	if (iResult == SOCKET_ERROR) {
+		wprintf(L"closesocket failed with error: %d\n", WSAGetLastError());
+		WSACleanup();
+		return -1;
+	}
+	WSACleanup();
+	free(msgCpy);
+	return 0;
+}
 
 namespace ve {
+
+	char* host = "127.0.0.1";
+	short port = 5005;
 
 	uint8_t endcode[] = { 0, 0, 1, 0xb7 };
 	uint32_t g_score = 0;
 	uint8_t g_state = 0; // 0 - searching, 1 - picked up
 	int imgWidth = 800;
 	int imgHeight = 600;
+	int packetsSent = 0;
 
 	static const glm::vec3 g_goalPosition = glm::vec3(-5.0f, 1.3f, 5.0f);
 	static const glm::vec3 g_carryPosition = glm::vec3(0.0f, 0.0f, 2.0f);
@@ -46,20 +134,23 @@ namespace ve {
 		AVStream* st;
 		SwsContext* sws_ctx;
 		int64_t next_pts = 1;
-		const int SKIP_FRAMES = 0;
+		const int SKIP_FRAMES = 1;
+		std::string filename;
 
 		
 		
 		void initializeCodec(std::string encoding, int bit_rate, std::string extension, AVCodecID codec_id)
 		{
 			int ret;
-			std::string filename("media/videos/video-" +std::to_string(bit_rate) + "-" + avcodec_get_name(codec_id) + "-" + std::to_string(time(NULL)) + "." + extension);
+			this->filename = std::string("media/videos/video-" +std::to_string(bit_rate) + "-" + avcodec_get_name(codec_id) + "-" + std::to_string(time(NULL)) + "." + extension);
 			
 			AVOutputFormat* fmt;
 			AVFormatContext* oc;
 			AVCodec *codec;
 
-			avformat_alloc_output_context2(&oc, NULL, encoding.c_str(), filename.c_str());
+			const char* url = filename.c_str();
+
+			avformat_alloc_output_context2(&oc, NULL, encoding.c_str(), url);
 			if (!oc) {
 				printf("Could not deduce output format from file extension: using MPEG.\n");
 				avformat_alloc_output_context2(&oc, NULL, "mpeg", filename.c_str());
@@ -104,12 +195,14 @@ namespace ve {
 			// resolution must be a multiple of two
 			c->width = imgWidth;
 			c->height = imgHeight;
+
+			int fps = 25;
 			
 			// frames per second
-			st->time_base = AVRational{ 1, 30 };
-			st->avg_frame_rate = AVRational{ 30, 1 };
+			st->time_base = AVRational{ 1, fps };
+			st->avg_frame_rate = AVRational{ fps, 1 };
 			c->time_base = st->time_base;
-			c->framerate = AVRational{ 30, 1 };
+			c->framerate = AVRational{ fps, 1 };
 			c->gop_size = 15; // emit one intra frame every 15 frames
 			c->pix_fmt = AV_PIX_FMT_YUV420P;
 
@@ -147,13 +240,16 @@ namespace ve {
 				exit(1);
 			}
 
-			av_dump_format(oc, 0, filename.c_str(), 1);
+			// av_dump_format(oc, 0, filename.c_str(), 1);
 
-			ret = avio_open(&oc->pb, filename.c_str(), AVIO_FLAG_WRITE);
+			// ret = avio_open(&oc->pb, url, AVIO_FLAG_WRITE);
+			ret = avio_open_dyn_buf(&oc->pb);
 			if (ret < 0) {
-				fprintf(stderr, "Could not open '%s'\n", filename);
+				//fprintf(stderr, "Could not open '%s'\n", filename);
+				fprintf(stderr, "Could not open dynamic buffer");
 				exit(1);
 			}
+
 
 			ret = avformat_write_header(oc, NULL);
 			if (ret < 0) {
@@ -161,6 +257,11 @@ namespace ve {
 				exit(1);
 			}
 
+			unsigned char* l_strBuffer = NULL;
+			int l_iBufferLen = 0;
+			l_iBufferLen = avio_close_dyn_buf(oc->pb,(uint8_t**)(&l_strBuffer));
+			sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen,packetsSent++);
+			av_free(l_strBuffer);
 			
 
 			SwsContext* ctx = sws_getContext(c->width, c->height,
@@ -207,8 +308,26 @@ namespace ve {
 				/* rescale output packet timestamp values from codec to stream timebase */
 				av_packet_rescale_ts(&pkt, c->time_base, st->time_base);
 				(&pkt)->stream_index = st->index;
+				
 				/* Write the compressed frame to the media file. */
+				
+
+				int ret = avio_open_dyn_buf(&oc->pb);
+				if (ret < 0) {
+					//fprintf(stderr, "Could not open '%s'\n", filename);
+					fprintf(stderr, "Could not open dynamic buffer");
+					exit(1);
+				}
+
 				ret = av_interleaved_write_frame(oc, &pkt);
+
+				unsigned char* l_strBuffer = NULL;
+				int l_iBufferLen = 0;
+				l_iBufferLen = avio_close_dyn_buf(oc->pb, (uint8_t**)(&l_strBuffer));
+				sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen, packetsSent++);
+				av_free(l_strBuffer);
+
+
 			}
 			else {
 				ret = 0;
@@ -218,14 +337,36 @@ namespace ve {
 				exit(1);
 			}
 		}
+
+
 		void finalizeCodec()
 		{
+			int ret = avio_open_dyn_buf(&oc->pb);
+			if (ret < 0) {
+				//fprintf(stderr, "Could not open '%s'\n", filename);
+				fprintf(stderr, "Could not open dynamic buffer");
+				exit(1);
+			}
+
+
+
 			av_write_trailer(this->oc);
-			
+
+			unsigned char* l_strBuffer = NULL;
+			int l_iBufferLen = 0;
+			l_iBufferLen = avio_close_dyn_buf(oc->pb, (uint8_t**)(&l_strBuffer));
+			sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen, packetsSent++);
+			av_free(l_strBuffer);
+
+
+			sendUDP(host,port, (char*)endcode, sizeof(endcode), packetsSent++);
+
+			Sleep(1000);
+
 			avcodec_free_context(&(this->enc_ctx));
 			av_frame_free(&(this->frame));
 						
-			avio_closep(&(this->oc->pb));
+			// avio_closep(&(this->oc->pb));
 
 			/* free the stream */
 			avformat_free_context(this->oc);
@@ -548,7 +689,7 @@ int main() {
 	int br_1Kb = 1000;
 	int br_1Mb = 1000 * br_1Kb;
 
-	MyVulkanEngine mve("matroska", 5*br_1Mb, "mkv", AV_CODEC_ID_H264, debug=debug);	//enable or disable debugging (=callback, validation layers)
+	MyVulkanEngine mve("matroska", 1*br_1Mb, "mkv", AV_CODEC_ID_MPEG4, debug=debug);	//enable or disable debugging (=callback, validation layers)
 	mve.initEngine();
 	mve.loadLevel(1);
 	mve.run();

@@ -1,0 +1,5 @@
+﻿  main.cpp
+C:\Users\pavao\Documents\erasmus\Courses\CloudGaming\VVE\GamePlayer\main.cpp(51,29): warning C4838: conversion from 'int' to 'char' requires a narrowing conversion
+C:\Users\pavao\Documents\erasmus\Courses\CloudGaming\VVE\GamePlayer\main.cpp(51,29): warning C4309: 'initializing': truncation of constant value
+C:\Users\pavao\Documents\erasmus\Courses\CloudGaming\VVE\GamePlayer\main.cpp(222,112): warning C4267: 'argument': conversion from 'size_t' to 'int', possible loss of data
+  GamePlayer.vcxproj -> C:\Users\pavao\Documents\erasmus\Courses\CloudGaming\VVE\x64\Debug\GamePlayer.exe
