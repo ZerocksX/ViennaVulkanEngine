@@ -1,4 +1,3 @@
-
 #include <winsock2.h>
 #include <Windows.h>
 #include <Ws2tcpip.h>
@@ -10,10 +9,9 @@
 #include <cstdio>
 #include <fstream>
 
-
-
-
 #include <cmath>
+
+#include <thread>
 
 extern "C" {
 #include "libavcodec/avcodec.h"
@@ -41,69 +39,168 @@ typedef struct MyPackage {
 } MyPackage;
 
 std::mutex mtx;
+namespace Socket {
 
-int sendUDP(char* host, short port, char* message, int length, int id) {
-	char* msgCpy = (char*)malloc(length);
-	memcpy(msgCpy, message, length);
-	int iResult;
-	WSADATA wsaData;
+	const int BUFLEN = 1600;
+	const short port = 5006;
 
-	SOCKET SendSocket = INVALID_SOCKET;
-	sockaddr_in RecvAddr;
+	typedef struct KeyPackage {
+		char key;
+		std::chrono::nanoseconds nsSent;
+	};
 
-	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-	if (iResult != NO_ERROR) {
-		wprintf(L"WSAStartup failed with error: %d\n", iResult);
-		return -1;
-	}
 
-	SendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (SendSocket == INVALID_SOCKET) {
-		wprintf(L"socket failed with error: %ld\n", WSAGetLastError());
-		WSACleanup();
-		return -1;
-	}
+	class UDPReciever {
+	private:
+		SOCKET s;
+		struct sockaddr_in server, si_other;
+		int slen, recv_len;
+		char buf[BUFLEN];
+		WSADATA wsa;
+	public:
+		UDPReciever() {
+			this->slen = sizeof(this->si_other);
 
-	RecvAddr.sin_family = AF_INET;
-	RecvAddr.sin_port = htons(port);
-	RecvAddr.sin_addr.s_addr = inet_addr(host);
+			//Initialise winsock
+			printf("\nInitialising Winsock...");
+			if (WSAStartup(MAKEWORD(2, 2), &(this->wsa)) != 0)
+			{
+				printf("Failed.Error Code : %d", WSAGetLastError());
+				exit(EXIT_FAILURE);
+			}
+			printf("Initialised.\n");
 
-	/* send a message to the server */
-	int pos = 0;
-	char buffer[1600];
-	int total = length / 1400;
-	int current = 0;
-	do 
-	{
-		int messageLength = std::min(1400, length - pos);
-		MyPackage package;
-		package.id = id;
-		package.current = current++;
-		package.total = total;
-		package.len = messageLength;
-		int pkgSize = 16 + messageLength;
-		memcpy(&package.data, (char*)(msgCpy + pos), messageLength);
-		memcpy(&buffer, &package, pkgSize);
-		if (sendto(SendSocket, buffer, pkgSize, 0, (struct sockaddr*) & RecvAddr, sizeof(RecvAddr)) < 0) {
-			perror("sendto failed");
-			return -1;
+			//Create a socket
+			if ((this->s = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
+			{
+				printf("Could not create socket : %d", WSAGetLastError());
+			}
+			printf("Socket created.\n ");
+
+			//Prepare the sockaddr_in structure
+			this->server.sin_family = AF_INET;
+			this->server.sin_addr.s_addr = INADDR_ANY;
+			this->server.sin_port = htons(port);
+
+			//Bind
+			if (bind(this->s, (struct sockaddr*) & (this->server), sizeof(this->server)) == SOCKET_ERROR)
+			{
+				printf("Bind failed with error code : %d", WSAGetLastError());
+				exit(EXIT_FAILURE);
+			}
+			printf("Bind done.");
+
 		}
-		printf("Sent %d %d/%d\n", package.id, package.current, package.total);
-		pos += messageLength;
-	} while (pos < length);
 
-	// wprintf(L"Finished sending. Closing socket.\n");
-	iResult = closesocket(SendSocket);
-	if (iResult == SOCKET_ERROR) {
-		wprintf(L"closesocket failed with error: %d\n", WSAGetLastError());
-		WSACleanup();
-		return -1;
-	}
-	WSACleanup();
-	free(msgCpy);
-	return 0;
+		KeyPackage* recieve() {
+			//clear the buffer by filling null, it might have previously received data
+			memset(this->buf, 0, BUFLEN);
+
+			//try to receive some data, this is a blocking call
+			if ((this->recv_len = recvfrom(this->s, this->buf, BUFLEN, 0, (struct sockaddr*) & (this->si_other), &(this->slen))) == SOCKET_ERROR)
+			{
+				printf("recvfrom() failed with error code : %d", WSAGetLastError());
+				exit(EXIT_FAILURE);
+			}
+			KeyPackage* package = (KeyPackage*)buf;
+
+			return package;
+		}
+
+		~UDPReciever() {
+			closesocket(this->s);
+			WSACleanup();
+		}
+	};
+
+	class UDPSender {
+	private:
+		int iResult;
+		WSADATA wsaData;
+		SOCKET SendSocket = INVALID_SOCKET;
+		sockaddr_in RecvAddr;
+	public:
+		UDPSender(char* host, short port) {
+			iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+			if (iResult != NO_ERROR) {
+				wprintf(L"WSAStartup failed with error: %d\n", iResult);
+				exit(-1);
+			}
+
+			SendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			if (SendSocket == INVALID_SOCKET) {
+				wprintf(L"socket failed with error: %ld\n", WSAGetLastError());
+				WSACleanup();
+				exit(-1);
+			}
+
+			RecvAddr.sin_family = AF_INET;
+			RecvAddr.sin_port = htons(port);
+			RecvAddr.sin_addr.s_addr = inet_addr(host);
+		}
+
+
+
+		int sendUDP(char* host, short port, char* message, int length, int id) {
+			char* msgCpy = (char*)malloc(length);
+			memcpy(msgCpy, message, length);
+
+
+			/* send a message to the server */
+			int pos = 0;
+			int total = length / 1400;
+			int current = 0;
+			std::map<int,bool> dones;
+			for (int i = 0; i <= total; i++)
+				dones.insert(std::make_pair(i, false));
+			do
+			{
+				int messageLength = std::min(1400, length - pos);
+				MyPackage package;
+				package.id = id;
+				package.current = current++;
+				package.total = total;
+				package.len = messageLength;
+				int pkgSize = 16 + messageLength;
+				memcpy(&package.data, (char*)(msgCpy + pos), messageLength);
+				//char buffer[1600];
+				//memcpy(&(buffer), &package, pkgSize);
+				std::vector<char> buff;
+				for (int i = 0; i < pkgSize; i++) {
+					buff.push_back(((char*)(&package))[i]);
+				}
+				//std::thread sendThread([&, buff] {
+					sendto(SendSocket, buff.data(), buff.size(), 0, (struct sockaddr*) & RecvAddr, sizeof(RecvAddr));
+					//printf("Sent %d %d/%d\n", ((MyPackage*)buff.data())->id, ((MyPackage*)buff.data())->current, ((MyPackage*)buff.data())->total);
+					dones.erase(((MyPackage*)buff.data())->current);
+				//});
+				//sendThread.detach();
+
+				pos += messageLength;
+			} while (pos < length);
+			//printf("Sent total %d\n", length);
+			while (!dones.empty()) {
+				std::this_thread::sleep_for(std::chrono::microseconds(50));
+				//printf("Waited 1us\n");
+			}
+			free(msgCpy);
+			return 0;
+		}
+
+		~UDPSender() {
+			// wprintf(L"Finished sending. Closing socket.\n");
+			iResult = closesocket(SendSocket);
+			if (iResult == SOCKET_ERROR) {
+				wprintf(L"closesocket failed with error: %d\n", WSAGetLastError());
+				WSACleanup();
+				exit(-1);
+			}
+			WSACleanup();
+		}
+
+	};
+
 }
-
 namespace ve {
 
 	char* host = "127.0.0.1";
@@ -112,8 +209,8 @@ namespace ve {
 	uint8_t endcode[] = { 0, 0, 1, 0xb7 };
 	uint32_t g_score = 0;
 	uint8_t g_state = 0; // 0 - searching, 1 - picked up
-	int imgWidth = 800;
-	int imgHeight = 600;
+	int imgWidth = 1280;
+	int imgHeight = 720;
 	int packetsSent = 0;
 
 	static const glm::vec3 g_goalPosition = glm::vec3(-5.0f, 1.3f, 5.0f);
@@ -136,6 +233,7 @@ namespace ve {
 		int64_t next_pts = 1;
 		const int SKIP_FRAMES = 1;
 		std::string filename;
+		Socket::UDPSender udpSender;
 
 		
 		
@@ -196,21 +294,21 @@ namespace ve {
 			c->width = imgWidth;
 			c->height = imgHeight;
 
-			int fps = 25;
+			int fps = 15;
 			
 			// frames per second
 			st->time_base = AVRational{ 1, fps };
 			st->avg_frame_rate = AVRational{ fps, 1 };
 			c->time_base = st->time_base;
 			c->framerate = AVRational{ fps, 1 };
-			c->gop_size = 15; // emit one intra frame every 15 frames
+			c->gop_size = 1; // emit one intra frame every 5 frames
 			c->pix_fmt = AV_PIX_FMT_YUV420P;
 
 					   	
 			c->max_b_frames = 2;
 
-			if (oc->oformat->flags & AVFMT_GLOBALHEADER)
-				c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+			if (oc->oformat->flags & 0x0040)
+				c->flags |= 1<<22;
 
 			/* open the codec */
 			ret = avcodec_open2(c, codec, NULL);
@@ -260,7 +358,7 @@ namespace ve {
 			unsigned char* l_strBuffer = NULL;
 			int l_iBufferLen = 0;
 			l_iBufferLen = avio_close_dyn_buf(oc->pb,(uint8_t**)(&l_strBuffer));
-			sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen,packetsSent++);
+			this->udpSender.sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen,packetsSent++);
 			av_free(l_strBuffer);
 			
 
@@ -324,7 +422,7 @@ namespace ve {
 				unsigned char* l_strBuffer = NULL;
 				int l_iBufferLen = 0;
 				l_iBufferLen = avio_close_dyn_buf(oc->pb, (uint8_t**)(&l_strBuffer));
-				sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen, packetsSent++);
+				this->udpSender.sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen, packetsSent++);
 				av_free(l_strBuffer);
 
 
@@ -355,11 +453,11 @@ namespace ve {
 			unsigned char* l_strBuffer = NULL;
 			int l_iBufferLen = 0;
 			l_iBufferLen = avio_close_dyn_buf(oc->pb, (uint8_t**)(&l_strBuffer));
-			sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen, packetsSent++);
+			this->udpSender.sendUDP(host, port, (char*)l_strBuffer, l_iBufferLen, packetsSent++);
 			av_free(l_strBuffer);
 
 
-			sendUDP(host,port, (char*)endcode, sizeof(endcode), packetsSent++);
+			this->udpSender.sendUDP(host,port, (char*)endcode, sizeof(endcode), packetsSent++);
 
 			Sleep(1000);
 
@@ -396,9 +494,10 @@ namespace ve {
 
 				m_numScreenshot++;
 				
+				//auto now = std::chrono::system_clock::now();
 				// encode(this->enc_ctx, dataImage, this->pkt, this->outfile);
 				encode(dataImage);
-				
+				//printf("Endoding in milliseconds: %d\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - now).count());
 
 				delete[] dataImage;
 				framesPassed = 0;
@@ -407,7 +506,7 @@ namespace ve {
 		}
 	public:
 		///Constructor of class EventListenerCollision
-		EventListenerFrameDump(std::string name, int bitRate, std::string encoding, std::string extension, AVCodecID codecId) : VEEventListenerGLFW(name) {
+		EventListenerFrameDump(std::string name, int bitRate, std::string encoding, std::string extension, AVCodecID codecId) : VEEventListenerGLFW(name), udpSender(host, port) {
 			this->initializeCodec(encoding, bitRate, extension, codecId);
 		};
 
@@ -416,7 +515,6 @@ namespace ve {
 			this->finalizeCodec();
 		};
 	};
-
 
 	class EventListenerCollision : public VEEventListener {
 	protected:
@@ -430,21 +528,40 @@ namespace ve {
 			VECHECKPOINTER(carryParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Carry Parent"));
 			VEEntity* characterParent;
 			VECHECKPOINTER(characterParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Character Parent"));
-			float distance;
+			VEEntity* opponentParent;
+			VECHECKPOINTER(opponentParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Opponent Parent"));
+			float boxDistance;
+			float goalDistance;
+			float opponentDistance;
 			switch (g_state)
 			{
 			case 0: //searching
-				distance = glm::distance(caseParent->getPosition(), characterParent->getPosition());
-				if (distance < 1.5f) {
+				opponentDistance = glm::distance(opponentParent->getPosition(), characterParent->getPosition());
+				if (opponentDistance < 2.0f) {
+					opponentParent->setPosition(glm::vec3(d(e), 1.0f, d(e)));
+					g_score++;
+				}
+				boxDistance = glm::distance(caseParent->getPosition(), characterParent->getPosition());
+				if (boxDistance < 1.5f) {
 					caseParent->setPosition(g_farPosition);
 					carryParent->setPosition(g_carryPosition);
-					goalParent->setPosition(g_goalPosition);
+					//goalParent->setPosition(g_goalPosition);
 					g_state = 1;
 				}
 				break;
 			case 1: //picked up
-				distance = glm::distance(goalParent->getPosition(), characterParent->getPosition());
-				if (distance < 3.0f) {
+				opponentDistance = glm::distance(opponentParent->getPosition(), characterParent->getPosition());
+				if (opponentDistance < 2.0f) {
+					caseParent->setPosition(glm::vec3(d(e), 1.0f, d(e)));
+					characterParent->setPosition(glm::vec3(d(e), characterParent->getPosition().y, d(e)));
+
+					carryParent->setPosition(g_farPosition);
+					g_state = 0;
+					g_score--;
+					break;
+				}
+				goalDistance = glm::distance(goalParent->getPosition(), characterParent->getPosition());
+				if (goalDistance < 3.0f) {
 					caseParent->setPosition(glm::vec3(d(e), 1.0f, d(e)));
 					carryParent->setPosition(g_farPosition);
 					// goalParent->setPosition(g_farPosition);
@@ -466,6 +583,67 @@ namespace ve {
 		virtual ~EventListenerCollision() {};
 	};
 
+	bool processKeyInput(Socket::KeyPackage* keyPkg) {
+		char key = keyPkg->key;
+		if (key == 'q') {				// q pressed - end the engine
+			getEnginePointer()->end();
+			return true;
+		}
+		
+		VEEntity* characterParent;
+		VECHECKPOINTER(characterParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Character Parent"));
+		VEEntity* opponentParent;
+		VECHECKPOINTER(opponentParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Opponent Parent"));
+
+
+		glm::vec4 rot4C = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+		glm::vec4 rot4O = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+		glm::vec4 dir4C = glm::normalize(characterParent->getTransform() * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f));
+		glm::vec3 dirC = glm::vec3(dir4C.x, dir4C.y, dir4C.z);
+		glm::vec4 dir4O = glm::normalize(opponentParent->getTransform() * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+		glm::vec3 dirO = glm::vec3(dir4O.x, dir4O.y, dir4O.z);
+
+		float rotSpeedC = 0.3f;
+		float speedC = 1.3f;
+		float rotSpeedO = 0.3f;
+		float speedO = 1.3f;
+
+
+		VECamera* pCamera = getSceneManagerPointer()->getCamera();
+		VESceneNode* pParent = pCamera->getParent();
+
+		switch (key) {
+		case 'a':
+			characterParent->setTransform(glm::rotate(characterParent->getTransform(), -rotSpeedC, glm::vec3(rot4C.x, rot4C.y, rot4C.z)));
+			break;
+		case 'd':
+			characterParent->setTransform(glm::rotate(characterParent->getTransform(), rotSpeedC, glm::vec3(rot4C.x, rot4C.y, rot4C.z)));
+			break;
+		case 'w':
+			characterParent->multiplyTransform(glm::translate(glm::mat4(1.0f), speedC * dirC));
+			break;
+		case 's':
+			characterParent->multiplyTransform(glm::translate(glm::mat4(1.0f), -speedC * dirC));
+			break;
+		case 'W':
+			opponentParent->multiplyTransform(glm::translate(glm::mat4(1.0f), speedO * dirO));
+			break;
+		case 'S':
+			opponentParent->multiplyTransform(glm::translate(glm::mat4(1.0f), -speedO * dirO));
+			break;
+		case 'A':
+			opponentParent->setTransform(glm::rotate(opponentParent->getTransform(), -rotSpeedO, glm::vec3(rot4O.x, rot4O.y, rot4O.z)));
+			break;
+		case 'D':
+			opponentParent->setTransform(glm::rotate(opponentParent->getTransform(), +rotSpeedO, glm::vec3(rot4O.x, rot4O.y, rot4O.z)));
+			break;
+
+		default:
+			return false;
+		};
+		return true;
+	}
+
 	class EventListenerControls : public VEEventListener {
 	protected:
 		virtual bool onKeyboard(veEvent event) {
@@ -478,11 +656,16 @@ namespace ve {
 
 			VEEntity* characterParent;
 			VECHECKPOINTER(characterParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Character Parent"));
+			VEEntity* opponentParent;
+			VECHECKPOINTER(opponentParent = (VEEntity*)getSceneManagerPointer()->getSceneNode("Opponent Parent"));
 
 
-			glm::vec4 rot4Character = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
-			glm::vec4 dir4 = glm::normalize(characterParent->getTransform() * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f));
-			glm::vec3 dir = glm::vec3(dir4.x, dir4.y, dir4.z);
+			glm::vec4 rot4C = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+			glm::vec4 rot4O = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+			glm::vec4 dir4C = glm::normalize(characterParent->getTransform() * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f));
+			glm::vec3 dirC = glm::vec3(dir4C.x, dir4C.y, dir4C.z);
+			glm::vec4 dir4O = glm::normalize(opponentParent->getTransform() * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+			glm::vec3 dirO = glm::vec3(dir4O.x, dir4O.y, dir4O.z);
 
 			float rotSpeed = 2.0f * event.dt;
 			float speed = 5.0f * event.dt;
@@ -493,17 +676,30 @@ namespace ve {
 
 			switch (event.idata1) {
 			case GLFW_KEY_A:
-				characterParent->setTransform(glm::rotate(characterParent->getTransform(), -rotSpeed, glm::vec3(rot4Character.x, rot4Character.y, rot4Character.z)));
+				characterParent->setTransform(glm::rotate(characterParent->getTransform(), -rotSpeed, glm::vec3(rot4C.x, rot4C.y, rot4C.z)));
 				break;
 			case GLFW_KEY_D:
-				characterParent->setTransform(glm::rotate(characterParent->getTransform(), rotSpeed, glm::vec3(rot4Character.x, rot4Character.y, rot4Character.z)));
+				characterParent->setTransform(glm::rotate(characterParent->getTransform(), rotSpeed, glm::vec3(rot4C.x, rot4C.y, rot4C.z)));
 				break;
 			case GLFW_KEY_W:
-				characterParent->multiplyTransform(glm::translate(glm::mat4(1.0f), speed * dir));
+				characterParent->multiplyTransform(glm::translate(glm::mat4(1.0f), speed * dirC));
 				break;
 			case GLFW_KEY_S:
-				characterParent->multiplyTransform(glm::translate(glm::mat4(1.0f), -speed * dir));
+				characterParent->multiplyTransform(glm::translate(glm::mat4(1.0f), -speed * dirC));
 				break;
+			case GLFW_KEY_UP:
+				opponentParent->multiplyTransform(glm::translate(glm::mat4(1.0f), speed * dirO));
+				break;
+			case GLFW_KEY_DOWN:
+				opponentParent->multiplyTransform(glm::translate(glm::mat4(1.0f), -speed * dirO));
+				break;
+			case GLFW_KEY_LEFT:
+				opponentParent->setTransform(glm::rotate(opponentParent->getTransform(), -rotSpeed, glm::vec3(rot4O.x, rot4O.y, rot4O.z)));
+				break;
+			case GLFW_KEY_RIGHT:
+				opponentParent->setTransform(glm::rotate(opponentParent->getTransform(), +rotSpeed, glm::vec3(rot4O.x, rot4O.y, rot4O.z)));
+				break;
+
 
 			default:
 				return false;
@@ -517,7 +713,7 @@ namespace ve {
 		virtual ~EventListenerControls() {};
 	};
 
-	class EventListenerGUI : public VEEventListener {
+	class EventListenerGUIScore : public VEEventListener {
 	protected:
 
 		virtual void onDrawOverlay(veEvent event) {
@@ -526,7 +722,7 @@ namespace ve {
 
 			struct nk_context* ctx = pSubrender->getContext();
 
-			if (nk_begin(ctx, "", nk_rect(600, 0, 200, 170), NK_WINDOW_BORDER)) {
+			if (nk_begin(ctx, "score", nk_rect(ve::imgWidth-275, 0, 275, 170), NK_WINDOW_BORDER)) {
 				char outbuffer[100];
 				nk_layout_row_dynamic(ctx, 45, 1);
 				sprintf(outbuffer, "Score: %03d", g_score);
@@ -536,15 +732,20 @@ namespace ve {
 				switch (g_state)
 				{
 				case 0:
-					sprintf(outbuffer, "Find the box!");
+					sprintf(outbuffer, "Find the box");
+					nk_label(ctx, outbuffer, NK_TEXT_LEFT);
+					sprintf(outbuffer, "or get the fish!");
+					nk_label(ctx, outbuffer, NK_TEXT_LEFT);
 					break;
 				case 1:
-					sprintf(outbuffer, "Bring it back!");
+					sprintf(outbuffer, "Bring it back");
+					nk_label(ctx, outbuffer, NK_TEXT_LEFT);
+					sprintf(outbuffer, "and escape the fish!");
+					nk_label(ctx, outbuffer, NK_TEXT_LEFT);
 					break;
 				default:
 					break;
 				}
-				nk_label(ctx, outbuffer, NK_TEXT_LEFT);
 			}
 
 			nk_end(ctx);
@@ -552,10 +753,10 @@ namespace ve {
 
 	public:
 		///Constructor of class EventListenerGUI
-		EventListenerGUI(std::string name) : VEEventListener(name) { };
+		EventListenerGUIScore(std::string name) : VEEventListener(name) { };
 
 		///Destructor of class EventListenerGUI
-		virtual ~EventListenerGUI() {};
+		virtual ~EventListenerGUIScore() {};
 	};
 
 
@@ -583,7 +784,7 @@ namespace ve {
 
 			registerEventListener(new EventListenerCollision("Collision"), { veEvent::VE_EVENT_FRAME_STARTED });
 			registerEventListener(new EventListenerControls("Controls"), { veEvent::VE_EVENT_KEYBOARD });
-			registerEventListener(new EventListenerGUI("GUI"), { veEvent::VE_EVENT_DRAW_OVERLAY });
+			registerEventListener(new EventListenerGUIScore("GUIScore"), { veEvent::VE_EVENT_DRAW_OVERLAY });
 			registerEventListener(new EventListenerFrameDump("FrameDump", this->bitRate, this->encoding, this->extension, codecId), { veEvent::VE_EVENT_FRAME_ENDED });
 		};
 
@@ -634,26 +835,44 @@ namespace ve {
 			VECHECKPOINTER(pE4 = (VEEntity*)getSceneManagerPointer()->getSceneNode("The Plane/plane_t_n_s.obj/plane/Entity_0"));
 			pE4->setParam(glm::vec4(1000.0f, 1000.0f, 0.0f, 0.0f));
 
-			VESceneNode* e1, * eParent;
-			eParent = getSceneManagerPointer()->createSceneNode("Character Parent", pScene, glm::mat4(1.0));
+			VESceneNode* e1, *e2, * eParent1, *eParent2;
+			eParent1 = getSceneManagerPointer()->createSceneNode("Character Parent", pScene, glm::mat4(1.0));
 			VECHECKPOINTER(e1 = getSceneManagerPointer()->loadModel("Character", "media/models/free/", "al.obj", aiProcess_FlipWindingOrder));
-			eParent->multiplyTransform(glm::scale(glm::mat4(1.0f), glm::vec3(0.5f,0.5f,0.5f)));
-			eParent->multiplyTransform(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.2f, 0.0f)));
+			eParent1->multiplyTransform(glm::scale(glm::mat4(1.0f), glm::vec3(0.5f,0.5f,0.5f)));
+			eParent1->multiplyTransform(glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.2f, 0.0f)));
 			glm::vec4 rot4Character = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
-			eParent->setTransform(glm::rotate(eParent->getTransform(), glm::pi<float>(), glm::vec3(rot4Character.x, rot4Character.y, rot4Character.z)));
+			eParent1->setTransform(glm::rotate(eParent1->getTransform(), glm::pi<float>(), glm::vec3(rot4Character.x, rot4Character.y, rot4Character.z)));
+
+			eParent1->addChild(e1);
 			
+
+			VESceneNode* carryParent, * carryObj;
+			carryParent = getSceneManagerPointer()->createSceneNode("Carry Parent", eParent1, glm::mat4(1.0));
+			VECHECKPOINTER(carryObj = getSceneManagerPointer()->loadModel("Carry", "media/models/test/crate0/", "cube.obj"));
+			carryParent->multiplyTransform(glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 1.0f, 1.0f)));
+			carryParent->multiplyTransform(glm::translate(glm::mat4(1.0f), g_farPosition));
+			carryParent->addChild(carryObj);
+
+
+			eParent2 = getSceneManagerPointer()->createSceneNode("Opponent Parent", pScene, glm::mat4(1.0));
+			VECHECKPOINTER(e2 = getSceneManagerPointer()->loadModel("Opponent", "media/models/free/Models_G0301A095/", "Common_Nase.obj", aiProcess_FlipWindingOrder));
+
+			eParent2->multiplyTransform(glm::scale(glm::mat4(1.0f), glm::vec3(0.1f, 0.1f, 0.1f)));
+			eParent2->multiplyTransform(glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 1.0f, -3.0f)));
+			glm::vec4 rot4Opponent = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+			eParent2->setTransform(glm::rotate(eParent2->getTransform(), glm::pi<float>() / 2, glm::vec3(rot4Opponent.x, rot4Opponent.y, rot4Opponent.z)));
+			rot4Opponent = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+			eParent2->setTransform(glm::rotate(eParent2->getTransform(), glm::pi<float>()/2, glm::vec3(rot4Opponent.x, rot4Opponent.y, rot4Opponent.z)));
+
+			eParent2->addChild(e2);
+
+
+
 			VESceneNode* caseParent, * caseObj;
 			caseParent = getSceneManagerPointer()->createSceneNode("Case Parent", pScene, glm::mat4(1.0));
 			VECHECKPOINTER(caseObj = getSceneManagerPointer()->loadModel("Case", "media/models/test/crate0/", "cube.obj"));
 			caseParent->multiplyTransform(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 1.0f, 2.0f)));
 			caseParent->addChild(caseObj);
-
-			VESceneNode* carryParent, * carryObj;
-			carryParent = getSceneManagerPointer()->createSceneNode("Carry Parent", eParent, glm::mat4(1.0));
-			VECHECKPOINTER(carryObj = getSceneManagerPointer()->loadModel("Carry", "media/models/test/crate0/", "cube.obj"));
-			carryParent->multiplyTransform(glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 1.0f, 1.0f)));
-			carryParent->multiplyTransform(glm::translate(glm::mat4(1.0f), g_farPosition));
-			carryParent->addChild(carryObj);
 
 			VESceneNode* goalParent, * goalObj;
 			goalParent = getSceneManagerPointer()->createSceneNode("Goal Parent", pScene, glm::mat4(1.0));
@@ -664,7 +883,6 @@ namespace ve {
 			goalParent->addChild(goalObj);
 
 			VESceneNode* cameraParent = getSceneManagerPointer()->getSceneNode("StandardCameraParent");
-			eParent->addChild(e1);
 		}
 		 
 		///Load the first level into the game engine
@@ -683,17 +901,31 @@ namespace ve {
 
 using namespace ve;
 
-int main() {
-
+void runGame() {
 	bool debug = true;
 	int br_1Kb = 1000;
 	int br_1Mb = 1000 * br_1Kb;
 
-	MyVulkanEngine mve("matroska", 1*br_1Mb, "mkv", AV_CODEC_ID_MPEG4, debug=debug);	//enable or disable debugging (=callback, validation layers)
-	mve.initEngine();
+	MyVulkanEngine mve("matroska", 400 * br_1Kb, "mkv", AV_CODEC_ID_MPEG4, debug = debug);	//enable or disable debugging (=callback, validation layers)
+	mve.initEngine(ve::imgWidth, ve::imgHeight);
 	mve.loadLevel(1);
 	mve.run();
 	std::cout << "Game finished!" << std::endl << "Score: " << g_score << std::endl;
+}
+
+void getKeyInput() {
+	Socket::UDPReciever rec;
+	while (true) {
+		Socket::KeyPackage* keyPkg = rec.recieve();
+		ve::processKeyInput(keyPkg);
+	}
+}
+
+int main() {
+	std::thread gameThread(runGame);
+	std::thread keyInputThread(getKeyInput);
+	gameThread.join();
+	keyInputThread.join();
 
 	return 0;
 }

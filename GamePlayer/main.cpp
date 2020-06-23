@@ -46,13 +46,16 @@ typedef struct MyPackage {
 } MyPackage;
 
 #define BUFLEN 1600
-#define INBUF_SIZE 4096
+#define INBUF_SIZE 1000
 
 char endcode[] = { 0, 0, 1, 0xb7 };
 
 
 const char* host = "127.0.0.1";
 short port = 5005;
+
+int width = 1280;
+int height = 720;
 
 
 void loadFromGame() {
@@ -118,7 +121,7 @@ void loadFromGame() {
 		}printf("\n");
 
 		if (package->len == 4) {
-			bool same = true;;
+			bool same = true;
 			for (int i = 0; i < 4; i++) {
 				if (package->data[i] != endcode[i]) {
 					same = false;
@@ -180,12 +183,13 @@ void decode_frame(AVCodecContext* dec_ctx, SwsContext* ctx, AVFrame* frame, AVPa
 		sws_scale(ctx, frame->data, frame->linesize, 0, frame->height, rgb->data, rgb->linesize);
 		stbi_write_jpg(buf, frame->width, frame->height, 4, rgb->data[0], 4 * frame->width);
 		av_frame_free(&rgb);
+		av_free(rgbBuffer);
 		//pgm_save(frame->data[0], frame->linesize[0], frame->width, frame->height, buf);
 	}
 }
 
 void decode() {
-	std::string filename = "mpeg4-1589340867.mkv";
+	std::string filename = /*"mpeg4-1589340867.mkv"*/"mpeg4-1590520094.mkv";
 	AVCodec* codec;
 	AVCodecParserContext* parser;
 	AVCodecContext* c = NULL;
@@ -208,8 +212,8 @@ void decode() {
 	fopen_s(&f, filename.c_str(), "rb");
 	frame = av_frame_alloc();
 
-	SwsContext* ctx = sws_getContext(800, 600,
-		AV_PIX_FMT_YUV420P, 800, 600,
+	SwsContext* ctx = sws_getContext(width, height,
+		AV_PIX_FMT_YUV420P, width, height,
 		AV_PIX_FMT_RGBA, SWS_BICUBIC, 0, 0, 0);
 
 	frame_count = 0;
@@ -220,6 +224,8 @@ void decode() {
 		data = inbuf;
 		while (data_size > 0) {
 			ret = av_parser_parse2(parser, c, &pkt->data, &pkt->size, data, data_size, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+			if (ret == 0)
+				printf("test");
 			data += ret;
 			data_size -= ret;
 			if (pkt->size) {
