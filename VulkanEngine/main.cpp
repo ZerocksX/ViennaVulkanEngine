@@ -218,6 +218,7 @@ namespace ve {
 	static const glm::vec3 g_farPosition = glm::vec3(0.0f, 0.0f, 100.0f);
 
 	static std::default_random_engine e{ 12345 };
+	static std::uniform_real_distribution<> d2{ 0.0f, 2.0f };
 	static std::uniform_real_distribution<> d{ -4.0f, 4.0f };
 
 	class EventListenerFrameDump : public VEEventListenerGLFW
@@ -538,7 +539,7 @@ namespace ve {
 			case 0: //searching
 				opponentDistance = glm::distance(opponentParent->getPosition(), characterParent->getPosition());
 				if (opponentDistance < 2.0f) {
-					opponentParent->setPosition(glm::vec3(d(e), 1.0f, d(e)));
+					opponentParent->setPosition(glm::vec3(+d2(e), 1.0f, -d2(e)));
 					g_score++;
 				}
 				boxDistance = glm::distance(caseParent->getPosition(), characterParent->getPosition());
@@ -552,8 +553,8 @@ namespace ve {
 			case 1: //picked up
 				opponentDistance = glm::distance(opponentParent->getPosition(), characterParent->getPosition());
 				if (opponentDistance < 2.0f) {
-					caseParent->setPosition(glm::vec3(d(e), 1.0f, d(e)));
-					characterParent->setPosition(glm::vec3(d(e), characterParent->getPosition().y, d(e)));
+					caseParent->setPosition(glm::vec3(characterParent->getPosition().x, 1.0f, characterParent->getPosition().z));
+					characterParent->setPosition(glm::vec3(-d2(e), characterParent->getPosition().y, +d2(e)));
 
 					carryParent->setPosition(g_farPosition);
 					g_state = 0;
@@ -906,7 +907,7 @@ void runGame() {
 	int br_1Kb = 1000;
 	int br_1Mb = 1000 * br_1Kb;
 
-	MyVulkanEngine mve("matroska", 400 * br_1Kb, "mkv", AV_CODEC_ID_MPEG4, debug = debug);	//enable or disable debugging (=callback, validation layers)
+	MyVulkanEngine mve("matroska", 4 * br_1Mb, "mkv", AV_CODEC_ID_MPEG4, debug = debug);	//enable or disable debugging (=callback, validation layers)
 	mve.initEngine(ve::imgWidth, ve::imgHeight);
 	mve.loadLevel(1);
 	mve.run();
