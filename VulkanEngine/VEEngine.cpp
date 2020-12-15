@@ -41,11 +41,11 @@ namespace ve {
 	* Creates a VEREnderer, VESceneManager, VEWindow. Then initializes Vulkan and gets the Vulkan instance.
 	* After this, initializes VERenderer, VESceneManager and VEWindow. Then it registers default event listeners.
 	*/
-	void VEEngine::initEngine() {
+	void VEEngine::initEngine(int height, int width) {
 		createRenderer();					//create a renderer
 		createSceneManager();				//create a scene manager
 		createWindow();						//create a window
-		m_pWindow->initWindow(800, 600);	//inittialize the window
+		m_pWindow->initWindow(height, width);	//inittialize the window
 
 		m_threadPool = new ThreadPool(0); //worker threads
 

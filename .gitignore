@@ -10,3 +10,10 @@ renderdoc.cap
 */CMakeFiles/
 */cmake_install.cmake
 */Makefile
+/VulkanEngine/media/videos
+/GamePlayer/media
+/x64
+QTGameClient/x64
+GamePlayer/x64
+GamePlayer/*.mkv
+GamePlayer/*.jpg

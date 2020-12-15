@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="QTGameClient">
+    <file>../loading_screen.png</file>
+    <file>../GamePlayer/test18.jpg</file>
+  </qresource>
+</RCC>
